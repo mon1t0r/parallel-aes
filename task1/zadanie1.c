@@ -45,6 +45,7 @@ struct opts {
 
 /* AES Spec: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf */
 /* SHA256 Spec: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf */
+/* PKCS#7 Spec: https://datatracker.ietf.org/doc/html/rfc5652#section-6.3 */
 
 /* Byte - size 1 byte */
 typedef unsigned char byte;
@@ -382,7 +383,7 @@ static void aes_key_expansion(const byte *key, word *key_sched)
     }
 }
 
-/* Compute SHA-256 hash from preprocessed message */
+/* Compute SHA-256 hash from preprocessed message (Sec. 6.2.2) */
 static void sha256_compute(const word *msg, int msg_sz_blk, word *hash)
 {
     int i, j;
@@ -466,6 +467,53 @@ static word *sha256_alloc_prep_msg(const char *msg, int *msg_sz_blk)
     return msg_pad;
 }
 
+/* PKCS#7 get existing padding implementation */
+static unsigned int pkcs7_get_pad(byte *buf)
+{
+    return buf[aes_block_sz - 1];
+}
+
+/* PKCS#7 padding add implementation */
+static void pkcs7_pad(byte *buf, unsigned int sz_read)
+{
+    byte padding;
+
+    /* Determine padding */
+    padding = aes_block_sz - (sz_read % aes_block_sz);
+
+    /* Fill padded space with padding value */
+    memset(buf + sz_read, padding, aes_block_sz - sz_read);
+}
+
+static int fd_is_eof(int fd)
+{
+    long long pos;
+    int res;
+
+    /* Backup stream position */
+    pos = lseek(fd, 0, SEEK_CUR);
+    if(pos == -1) {
+        ERR_LIB("lseek()", "Failed to obtain current stream position");
+        return -1;
+    }
+
+    /* Try to read a single byte */
+    res = read(fd, &res, 1);
+    if(res == -1) {
+        ERR_LIB("read()", "Failed to read test byte");
+        return -1;
+    }
+
+    /* Return stream position */
+    pos = lseek(fd, pos, SEEK_SET);
+    if(pos == -1) {
+        ERR_LIB("lseek()", "Failed to set stream position");
+        return -1;
+    }
+
+    return !res;
+}
+
 static int
 data_process(const struct opts *opts, const word *aes_key_sched)
 {
@@ -474,8 +522,10 @@ data_process(const struct opts *opts, const word *aes_key_sched)
     int res;
     byte buf[aes_block_sz];
     int close_res;
+    int is_eof;
     int sz;
     unsigned int sz_read;
+    unsigned int sz_to_write;
     unsigned int sz_write;
 
     /* Open input/output files */
@@ -494,6 +544,7 @@ data_process(const struct opts *opts, const word *aes_key_sched)
     /* Read AES block -> process AES block -> write AES block loop */
     do {
         sz_read = 0;
+        sz_to_write = 0;
         sz_write = 0;
 
         /* Read block or until no more data to read */
@@ -505,7 +556,7 @@ data_process(const struct opts *opts, const word *aes_key_sched)
                 goto exit;
             }
 
-            /* Exit loop if no more data to read */
+            /* Exit read loop if no more data to read */
             if(!sz) {
                 break;
             }
@@ -513,25 +564,48 @@ data_process(const struct opts *opts, const word *aes_key_sched)
             sz_read += sz;
         }
 
-        /* If no data was read, exit loop */
-        if(!sz_read) {
-            break;
-        }
-
-        /* If read less than buf size, fill the rest of block with zeroes */
-        if(sz_read < sizeof(buf)) {
-            memset(buf + sz_read, 0, sizeof(buf) - sz_read);
-        }
-
         if(opts->enc) {
+            /* Last iteration flag */
+            is_eof = sz_read < sizeof(buf);
+
+            if(is_eof) {
+                /* Pad the rest of the space */
+                pkcs7_pad(buf, sz_read);
+            }
+
             aes_cipher(buf, aes_key_sched);
+
+            /* Write whole block */
+            sz_to_write = sizeof(buf);
         } else {
+            /* Last iteration flag */
+            is_eof = fd_is_eof(fd_in);
+            if(is_eof == -1) {
+                res = 1;
+                goto exit;
+            }
+
+            /* File is not aliged with AES block size */
+            if(sz_read < sizeof(buf)) {
+                ERR("Input file is not aligned with AES block size");
+                res = 1;
+                goto exit;
+            }
+
             aes_inv_cipher(buf, aes_key_sched);
+
+            if(is_eof) {
+                /* Unpad data */
+                sz_to_write = sizeof(buf) - pkcs7_get_pad(buf);
+            } else {
+                /* Write whole block */
+                sz_to_write = sizeof(buf);
+            }
         }
 
-        /* Write block */
-        while(sz_write < sizeof(buf)) {
-            sz = write(fd_out, buf + sz_write, sizeof(buf) - sz_write);
+        /* Write block / unpadded data */
+        while(sz_write < sz_to_write) {
+            sz = write(fd_out, buf + sz_write, sz_to_write - sz_write);
             if(sz < 0) {
                 ERR_LIB("write()", "Failed to write output file");
                 res = 1;
@@ -540,7 +614,7 @@ data_process(const struct opts *opts, const word *aes_key_sched)
 
             sz_write += sz;
         }
-    } while(sz_read >= sizeof(buf));
+    } while(!is_eof);
 
     /* Executed successfully */
     res = 0;
