@@ -21,42 +21,48 @@ struct opts {
     const char *file_out;
 };
 
-/* https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf */
+/* AES Spec: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf */
 
 /* AES word - size 4 bytes */
 typedef unsigned int aes_word;
 
-enum {
-    /* AES block size, in bytes */
-    aes_block_sz = 16,
+/* AES byte - size 1 byte */
+typedef unsigned char aes_byte;
 
+enum {
     /* AES word size, in bytes */
-    aes_word_sz  = 4,
+    aes_word_sz    = 4,
+
+    /* AES block size, in words */
+    aes_block_sz_w = 4,
+
+    /* AES block size, in bytes */
+    aes_block_sz   = aes_block_sz_w * aes_word_sz,
 
     /* AES-256 number of rounds */
-    aes_round_no = 14,
+    aes_round_no   = 14,
 
     /* AES-256 key size, in words */
-    aes_key_sz_w = 8,
+    aes_key_sz_w   = 8,
 
     /* AES-256 key size, in bytes */
-    aes_key_sz   = aes_key_sz_w * aes_word_sz,
+    aes_key_sz     = aes_key_sz_w * aes_word_sz,
 
     /* AES-256 key schedule size, in words */
     aes_key_sched_sz_w = 4 * (aes_round_no + 1),
 
     /* AES-256 key schedule size, in bytes */
-    aes_key_sched_sz = aes_key_sched_sz_w * aes_word_sz
+    aes_key_sched_sz   = aes_key_sched_sz_w * aes_word_sz
 };
 
-/* AES rounds constants */
+/* AES round constants. Used for AES KeyExpansion (Sec. 5.2) */
 static const aes_word rcon[10] = {
     0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000,
     0x40000000, 0x80000000, 0x1b000000, 0x36000000
 };
 
-/* AES sbox values */
-static const unsigned char sbox[256] = {
+/* Pre-computed AES SBox values for a single byte (Sec. 5.1.1)*/
+static const aes_byte sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b,
     0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
     0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26,
@@ -81,11 +87,43 @@ static const unsigned char sbox[256] = {
     0xb0, 0x54, 0xbb, 0x16
 };
 
+/* AES xTimes implementation (Sec. 4.2) */
+static aes_byte aes_x_times(aes_byte b)
+{
+    if(b & 0x80) {
+        return (b << 1) & 0x1B;
+    } else {
+        return b << 1;
+    }
+}
+
+/* AES multiply two bytes in GF(2^8) (Sec. 4.2) */
+static aes_byte aes_mul_bytes(aes_byte b1, aes_byte b2)
+{
+    int i;
+    aes_byte res = 0;
+    aes_byte mul_res = b1;
+
+    for(i = 0; i < 8; i++) {
+        if(i) {
+            mul_res = aes_x_times(mul_res);
+        }
+
+        if(b2 & (0x1 << i)) {
+            res ^= mul_res;
+        }
+    }
+
+    return res;
+}
+
+/* AES RotWord implementation (sec. 5.2) */
 static void aes_rot_word(aes_word *word)
 {
     *word = ((*word) << 8) | (((*word) & 0xFF000000) >> 24);
 }
 
+/* AES SubWord implementation (sec. 5.2) */
 static void aes_sub_word(aes_word *word)
 {
     *word =
@@ -93,31 +131,121 @@ static void aes_sub_word(aes_word *word)
         (sbox[((*word) >> 8 ) & 0xFF] << 8 ) |
         (sbox[((*word) >> 16) & 0xFF] << 16) |
         (sbox[((*word) >> 24) & 0xFF] << 24);
+}
 
+/* AES MixColumns implementation (sec. 5.1.3) */
+static void aes_mix_columns(aes_byte *state)
+{
+    aes_byte state_temp[aes_block_sz];
+    unsigned int i;
+
+    for(i = 0; i < sizeof(state_temp); i += 4) {
+        state_temp[i + 0] = aes_mul_bytes(0x2, state[i + 0]) ^
+                            aes_mul_bytes(0x3, state[i + 1]) ^
+                            state[i + 2] ^
+                            state[i + 3];
+
+        state_temp[i + 1] = state[i + 0] ^
+                            aes_mul_bytes(0x2, state[i + 1]) ^
+                            aes_mul_bytes(0x3, state[i + 2]) ^
+                            state[i + 3];
+
+        state_temp[i + 2] = state[i + 0] ^
+                            state[i + 1] ^
+                            aes_mul_bytes(0x2, state[i + 2]) ^
+                            aes_mul_bytes(0x3, state[i + 3]);
+
+        state_temp[i + 3] = aes_mul_bytes(0x3, state[i + 0]) ^
+                            state[i + 1] ^
+                            state[i + 2] ^
+                            aes_mul_bytes(0x2, state[i + 3]);
+    }
+
+    memcpy(state, state_temp, sizeof(state_temp));
+}
+
+/* AES ShiftRows implementation (sec. 5.1.2) */
+static void aes_shift_rows(aes_byte *state)
+{
+    aes_byte state_temp[aes_block_sz];
+    unsigned int i;
+    int row;
+    int col;
+    int col_n;
+
+    for(i = 0; i < sizeof(state_temp); i++) {
+        row = i % 4;
+        col = i / 4;
+        col_n = (col + row) % 4;
+        state_temp[i] = state[col_n * 4 + row];
+    }
+
+    memcpy(state, state_temp, sizeof(state_temp));
+}
+
+/* AES SubBytes implementation (sec. 5.1.1) */
+static void aes_sub_bytes(aes_byte *state)
+{
+    int i;
+
+    for(i = 0; i < aes_block_sz; i++) {
+        state[i] = sbox[state[i]];
+    }
+}
+
+/* AES AddRoundKey implementation (sec. 5.1.4) */
+static void aes_add_round_key(aes_byte *state, const aes_word *round_key)
+{
+    int i;
+    int col;
+
+    for(i = 0; i < aes_block_sz_w; i++) {
+        col = i * 4;
+        state[col + 0] ^= ((round_key[i] >> 24) & 0xFF);
+        state[col + 1] ^= ((round_key[i] >> 16) & 0xFF);
+        state[col + 2] ^= ((round_key[i] >> 8 ) & 0xFF);
+        state[col + 3] ^= ((round_key[i] >> 0 ) & 0xFF);
+    }
 }
 
 #if 0
+/* AES InvCipher implementation (sec. 5.3) */
 static void
-aes_inv_cipher(unsigned char *block, const aes_word *key_sched)
+aes_inv_cipher(aes_byte *block, const aes_word *key_sched)
 {
     
 }
 #endif
 
-#if 0
-static void aes_cipher(unsigned char *block, const aes_word *key_sched)
+/* AES Cipher implementation (sec. 5.1) */
+static void aes_cipher(aes_byte *block, const aes_word *key_sched)
 {
-    
-}
-#endif
+    int r;
 
-static void aes_key_expansion(const unsigned char *key, aes_word *key_sched)
+    aes_add_round_key(block, key_sched);
+
+    for(r = 1; r < aes_round_no; r++) {
+        aes_sub_bytes(block);
+        aes_shift_rows(block);
+        aes_mix_columns(block);
+        aes_add_round_key(block, key_sched + 4 * r);
+    }
+
+    aes_sub_bytes(block);
+    aes_shift_rows(block);
+    aes_add_round_key(block, key_sched + 4 * aes_round_no);
+}
+
+/* AES KeyExpansion implementation (sec. 5.2) */
+static void aes_key_expansion(const aes_byte *key, aes_word *key_sched)
 {
     int i;
     aes_word temp;
 
+    /* Copy first Nk words of the key to the expanded key */
     memcpy(key_sched, key, aes_key_sz);
 
+    /* Generate subsequent words  */
     for(i = aes_key_sz_w; i < aes_key_sched_sz_w; i++) {
         temp = key_sched[i - 1];
 
@@ -139,7 +267,7 @@ data_process(const struct opts *opts, const aes_word *aes_key_sched)
     int fd_in;
     int fd_out;
     int res;
-    unsigned char buf[aes_block_sz];
+    aes_byte buf[aes_block_sz];
     int close_res;
     int sz;
     unsigned int sz_read;
@@ -190,8 +318,11 @@ data_process(const struct opts *opts, const aes_word *aes_key_sched)
             memset(buf + sz_read, 0, sizeof(buf) - sz_read);
         }
 
-        /* TODO: Process block */
-        ((void) aes_key_sched);
+        if(opts->enc) {
+            aes_cipher(buf, aes_key_sched);
+        } else {
+            aes_inv_cipher(buf, aes_key_sched);
+        }
 
         /* Write block */
         while(sz_write < sizeof(buf)) {
@@ -313,9 +444,9 @@ int main(int argc, const char *const *argv)
         return 1;
     }
 
-    /* TODO: Complement key to be 256 bit width */
+    /* TODO: Complement pwd to be 256 bit (16 byte) width */
     /* Compute AES key schedule from password */
-    aes_key_expansion((unsigned char *)opts.pwd, aes_key_sched);
+    aes_key_expansion((aes_byte *)opts.pwd, aes_key_sched);
 
     /* Perform AES encryption/decryption */
     res = data_process(&opts, aes_key_sched);
