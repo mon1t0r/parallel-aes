@@ -14,6 +14,28 @@
 
 #define OPT_STR "sdp:i:o:"
 
+/* General rotate word functions */
+#define ROTW_R(x, b) \
+   (((x) >> b) | ((x) << (32 - (b))))
+#define ROTW_L(x, b) \
+    (((x) << b) | ((x) >> (32 - (b))))
+
+/* SHA-256 functions (Sec. 4.1.2) */
+#define SHA256_CH(x, y, z) \
+    (((x) & (y)) ^ (~(x) & (z)))
+#define SHA256_MAJ(x, y, z) \
+    (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+
+#define SHA256_SUM_0(x) \
+    (ROTW_R(x, 2) ^ ROTW_R(x, 13) ^ ROTW_R(x, 22))
+#define SHA256_SUM_1(x) \
+    (ROTW_R(x, 6) ^ ROTW_R(x, 11) ^ ROTW_R(x, 25))
+
+#define SHA256_SIGMA_0(x) \
+    (ROTW_R(x, 7) ^ ROTW_R(x, 18) ^ ((x) >> 3))
+#define SHA256_SIGMA_1(x) \
+    (ROTW_R(x, 17) ^ ROTW_R(x, 19) ^ ((x) >> 10))
+
 struct opts {
     int enc;
     const char *pwd;
@@ -22,47 +44,57 @@ struct opts {
 };
 
 /* AES Spec: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf */
+/* SHA256 Spec: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf */
 
-/* AES word - size 4 bytes */
-typedef unsigned int aes_word;
+/* Byte - size 1 byte */
+typedef unsigned char byte;
 
-/* AES byte - size 1 byte */
-typedef unsigned char aes_byte;
+/* Word - size 4 bytes */
+typedef unsigned int word;
 
 enum {
     /* AES word size, in bytes */
-    aes_word_sz    = 4,
+    word_sz            = 4,
 
     /* AES block size, in words */
-    aes_block_sz_w = 4,
+    aes_block_sz_w     = 4,
 
     /* AES block size, in bytes */
-    aes_block_sz   = aes_block_sz_w * aes_word_sz,
+    aes_block_sz       = aes_block_sz_w * word_sz,
 
     /* AES-256 number of rounds */
-    aes_round_no   = 14,
+    aes_round_no       = 14,
 
     /* AES-256 key size, in words */
-    aes_key_sz_w   = 8,
+    aes_key_sz_w       = 8,
 
     /* AES-256 key size, in bytes */
-    aes_key_sz     = aes_key_sz_w * aes_word_sz,
+    aes_key_sz         = aes_key_sz_w * word_sz,
 
     /* AES-256 key schedule size, in words */
     aes_key_sched_sz_w = 4 * (aes_round_no + 1),
 
     /* AES-256 key schedule size, in bytes */
-    aes_key_sched_sz   = aes_key_sched_sz_w * aes_word_sz
+    aes_key_sched_sz   = aes_key_sched_sz_w * word_sz,
+
+    /* SHA-256 hash size, in words */
+    sha256_hash_sz_w   = 8,
+
+    /* SHA-256 block size, in bytes */
+    sha256_block_sz    = 64,
+
+    /* SHA-256 message schedule size, in words */
+    sha256_msg_sched_sz_w = 64
 };
 
 /* AES round constants. Used for AES KeyExpansion (Sec. 5.2) */
-static const aes_word rcon[11] = {
+static const word aes_rcon[11] = {
     0x00000000, 0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000,
     0x20000000, 0x40000000, 0x80000000, 0x1b000000, 0x36000000
 };
 
 /* Pre-computed AES SBox values for a single byte (Sec. 5.1.1) */
-static const aes_byte sbox[256] = {
+static const byte aes_sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b,
     0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
     0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26,
@@ -88,7 +120,7 @@ static const aes_byte sbox[256] = {
 };
 
 /* Pre-computed AES inverted SBox values for a single byte (Sec. 5.3.2) */
-static const aes_byte sbox_inv[256] = {
+static const byte aes_sbox_inv[256] = {
     0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e,
     0x81, 0xf3, 0xd7, 0xfb, 0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87,
     0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb, 0x54, 0x7b, 0x94, 0x32,
@@ -113,8 +145,29 @@ static const aes_byte sbox_inv[256] = {
     0x55, 0x21, 0x0c, 0x7d
 };
 
+/* SHA-256 Initial Hash Values (Sec. 5.3.3) */
+static const word sha256_hash_init[sha256_hash_sz_w] = {
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
+    0x1f83d9ab, 0x5be0cd19
+};
+
+/* SHA-256 round constants (Sec. 4.2.2) */
+static const word sha256_rcon[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
 /* AES xTimes implementation (Sec. 4.2) */
-static aes_byte aes_x_times(aes_byte b)
+static byte aes_x_times(byte b)
 {
     if(b & 0x80) {
         return (b << 1) ^ 0x1B;
@@ -124,11 +177,11 @@ static aes_byte aes_x_times(aes_byte b)
 }
 
 /* AES multiply two bytes in GF(2^8) (Sec. 4.2) */
-static aes_byte aes_mul_bytes(aes_byte b1, aes_byte b2)
+static byte aes_mul_bytes(byte b1, byte b2)
 {
     int i;
-    aes_byte res = 0;
-    aes_byte mul_res = b1;
+    byte res = 0;
+    byte mul_res = b1;
 
     for(i = 0; i < 8; i++) {
         if(i) {
@@ -143,26 +196,20 @@ static aes_byte aes_mul_bytes(aes_byte b1, aes_byte b2)
     return res;
 }
 
-/* AES RotWord implementation (sec. 5.2) */
-static void aes_rot_word(aes_word *word)
-{
-    *word = ((*word) << 8) | (((*word) & 0xFF000000) >> 24);
-}
-
-/* AES SubWord implementation (sec. 5.2) */
-static void aes_sub_word(aes_word *word)
+/* AES SubWord implementation (Sec. 5.2) */
+static void aes_sub_word(word *word)
 {
     *word =
-        (sbox[((*word) >> 0 ) & 0xFF] << 0 ) |
-        (sbox[((*word) >> 8 ) & 0xFF] << 8 ) |
-        (sbox[((*word) >> 16) & 0xFF] << 16) |
-        (sbox[((*word) >> 24) & 0xFF] << 24);
+        (aes_sbox[((*word) >> 0 ) & 0xFF] << 0 ) |
+        (aes_sbox[((*word) >> 8 ) & 0xFF] << 8 ) |
+        (aes_sbox[((*word) >> 16) & 0xFF] << 16) |
+        (aes_sbox[((*word) >> 24) & 0xFF] << 24);
 }
 
-/* AES InvMixColumns implementation (sec. 5.3.3) */
-static void aes_inv_mix_columns(aes_byte *state)
+/* AES InvMixColumns implementation (Sec. 5.3.3) */
+static void aes_inv_mix_columns(byte *state)
 {
-    aes_byte state_temp[aes_block_sz];
+    byte state_temp[aes_block_sz];
     unsigned int i;
 
     for(i = 0; i < sizeof(state_temp); i += 4) {
@@ -190,10 +237,10 @@ static void aes_inv_mix_columns(aes_byte *state)
     memcpy(state, state_temp, sizeof(state_temp));
 }
 
-/* AES MixColumns implementation (sec. 5.1.3) */
-static void aes_mix_columns(aes_byte *state)
+/* AES MixColumns implementation (Sec. 5.1.3) */
+static void aes_mix_columns(byte *state)
 {
-    aes_byte state_temp[aes_block_sz];
+    byte state_temp[aes_block_sz];
     unsigned int i;
 
     for(i = 0; i < sizeof(state_temp); i += 4) {
@@ -221,10 +268,10 @@ static void aes_mix_columns(aes_byte *state)
     memcpy(state, state_temp, sizeof(state_temp));
 }
 
-/* AES ShiftRows/InvShiftRows implementation (sec. 5.1.2, 5.3.1) */
-static void aes_shift_rows(aes_byte *state, int inv)
+/* AES ShiftRows/InvShiftRows implementation (Sec. 5.1.2, 5.3.1) */
+static void aes_shift_rows(byte *state, int inv)
 {
-    aes_byte state_temp[aes_block_sz];
+    byte state_temp[aes_block_sz];
     unsigned int i;
     int row;
     int col;
@@ -247,18 +294,18 @@ static void aes_shift_rows(aes_byte *state, int inv)
     memcpy(state, state_temp, sizeof(state_temp));
 }
 
-/* AES SubBytes/InvSubBytes implementation (sec. 5.1.1, 5.3.2) */
-static void aes_sub_bytes(aes_byte *state, int inv)
+/* AES SubBytes/InvSubBytes implementation (Sec. 5.1.1, 5.3.2) */
+static void aes_sub_bytes(byte *state, int inv)
 {
     int i;
 
     for(i = 0; i < aes_block_sz; i++) {
-        state[i] = inv ? sbox_inv[state[i]] : sbox[state[i]];
+        state[i] = inv ? aes_sbox_inv[state[i]] : aes_sbox[state[i]];
     }
 }
 
-/* AES AddRoundKey implementation (sec. 5.1.4) */
-static void aes_add_round_key(aes_byte *state, const aes_word *round_key)
+/* AES AddRoundKey implementation (Sec. 5.1.4) */
+static void aes_add_round_key(byte *state, const word *round_key)
 {
     int i;
     int col;
@@ -272,8 +319,8 @@ static void aes_add_round_key(aes_byte *state, const aes_word *round_key)
     }
 }
 
-/* AES InvCipher implementation (sec. 5.3) */
-static void aes_inv_cipher(aes_byte *block, const aes_word *key_sched)
+/* AES InvCipher implementation (Sec. 5.3) */
+static void aes_inv_cipher(byte *block, const word *key_sched)
 {
     int r;
 
@@ -291,8 +338,8 @@ static void aes_inv_cipher(aes_byte *block, const aes_word *key_sched)
     aes_add_round_key(block, key_sched);
 }
 
-/* AES Cipher implementation (sec. 5.1) */
-static void aes_cipher(aes_byte *block, const aes_word *key_sched)
+/* AES Cipher implementation (Sec. 5.1) */
+static void aes_cipher(byte *block, const word *key_sched)
 {
     int r;
 
@@ -310,11 +357,11 @@ static void aes_cipher(aes_byte *block, const aes_word *key_sched)
     aes_add_round_key(block, key_sched + 4 * aes_round_no);
 }
 
-/* AES KeyExpansion implementation (sec. 5.2) */
-static void aes_key_expansion(const aes_byte *key, aes_word *key_sched)
+/* AES KeyExpansion implementation (Sec. 5.2) */
+static void aes_key_expansion(const byte *key, word *key_sched)
 {
     int i;
-    aes_word temp;
+    word temp;
 
     /* Copy first Nk words of the key to the expanded key */
     memcpy(key_sched, key, aes_key_sz);
@@ -324,9 +371,9 @@ static void aes_key_expansion(const aes_byte *key, aes_word *key_sched)
         temp = key_sched[i - 1];
 
         if(i % aes_key_sz_w == 0) {
-            aes_rot_word(&temp);
+            temp = ROTW_L(temp, 8);
             aes_sub_word(&temp);
-            temp ^= rcon[i / aes_key_sz_w];
+            temp ^= aes_rcon[i / aes_key_sz_w];
         } else if(i % aes_key_sz_w == 4) {
             aes_sub_word(&temp);
         }
@@ -335,13 +382,97 @@ static void aes_key_expansion(const aes_byte *key, aes_word *key_sched)
     }
 }
 
+/* Compute SHA-256 hash from preprocessed message */
+static void sha256_compute(const word *msg, int msg_sz_blk, word *hash)
+{
+    int i, j;
+    word a, b, c, d, e, f, g, h, t1, t2;
+    word msg_sched[sha256_msg_sched_sz_w];
+
+    /* Initialize hash values */
+    memcpy(hash, sha256_hash_init, sizeof(sha256_hash_init));
+
+    for(i = 0; i < msg_sz_blk; i++) {
+        memcpy(msg_sched, msg + i * sha256_block_sz / word_sz, 16 * word_sz);
+
+        for(j = 16; j < sha256_msg_sched_sz_w; j++) {
+            msg_sched[j] =
+                SHA256_SIGMA_1(msg_sched[j - 2]) + msg_sched[j - 7] +
+                SHA256_SIGMA_0(msg_sched[j - 15]) + msg_sched[j - 16];
+        }
+
+        a = hash[0];
+        b = hash[1];
+        c = hash[2];
+        d = hash[3];
+        e = hash[4];
+        f = hash[5];
+        g = hash[6];
+        h = hash[7];
+
+        for(j = 0; j < sha256_msg_sched_sz_w; j++) {
+            t1 = h + SHA256_SUM_1(e) + SHA256_CH(e, f, g) + sha256_rcon[j] +
+                msg_sched[j];
+            t2 = SHA256_SUM_0(a) + SHA256_MAJ(a, b, c);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + t1;
+            d = c;
+            c = b;
+            b = a;
+            a = t1 + t2;
+        }
+
+        hash[0] += a;
+        hash[1] += b;
+        hash[2] += c;
+        hash[3] += d;
+        hash[4] += e;
+        hash[5] += f;
+        hash[6] += g;
+        hash[7] += h;
+    }
+}
+
+/* Allocate memory and preprocess message for SHA-256 hash computation */
+static word *sha256_alloc_prep_msg(const char *msg, int *msg_sz_blk)
+{
+    int msg_len;
+    int msg_len_bits;
+    word *msg_pad;
+    int msg_pad_sz;
+
+    /* Msg must not be longer than 4GiB (size written in 4 bytes int) */
+    msg_len = strlen(msg);
+    msg_len_bits = msg_len * 8;
+
+    /* Determine length of padded message, in 512-bit blocks (Sec. 5.1.1) */
+    *msg_sz_blk = (msg_len_bits + 1 + 64) / (sha256_block_sz * 8) + 1;
+    msg_pad_sz = *msg_sz_blk * sha256_block_sz;
+
+    msg_pad = calloc(msg_pad_sz, 1);
+
+    /* Fill padded bytes (Sec. 5.1.1) */
+
+    memcpy(msg_pad, msg, msg_len);
+
+    /* Set bit after msg in endian-independent way */
+    msg_pad[msg_len / word_sz] = 0x80 << ((3 - (msg_len % word_sz)) * 8);
+
+    msg_pad[msg_pad_sz / word_sz - 1] = msg_len_bits;
+
+    return msg_pad;
+}
+
 static int
-data_process(const struct opts *opts, const aes_word *aes_key_sched)
+data_process(const struct opts *opts, const word *aes_key_sched)
 {
     int fd_in;
     int fd_out;
     int res;
-    aes_byte buf[aes_block_sz];
+    byte buf[aes_block_sz];
     int close_res;
     int sz;
     unsigned int sz_read;
@@ -509,7 +640,10 @@ int main(int argc, const char *const *argv)
 {
     struct opts opts;
     int res;
-    aes_word aes_key_sched[aes_key_sched_sz_w];
+    word *sha256_msg;
+    int sha256_msg_sz_blk;
+    word sha256_key_hash[sha256_hash_sz_w];
+    word aes_key_sched[aes_key_sched_sz_w];
 
     /* Parse input arguments */
     res = opts_parse(&opts, argc, argv);
@@ -518,17 +652,26 @@ int main(int argc, const char *const *argv)
         return 1;
     }
 
-    /* TODO: Complement pwd to be 256 bit (16 byte) width */
-    /* Compute AES key schedule from password */
-    aes_key_expansion((aes_byte *)opts.pwd, aes_key_sched);
+    /* Preprocess SHA-256 message from password */
+    sha256_msg = sha256_alloc_prep_msg(opts.pwd, &sha256_msg_sz_blk);
+
+    /* Compute SHA-256 hash from SHA-256 message */
+    sha256_compute(sha256_msg, sha256_msg_sz_blk, sha256_key_hash);
+
+    /* Compute AES key schedule from SHA-256 hash */
+    aes_key_expansion((byte *) sha256_key_hash, aes_key_sched);
 
     /* Perform AES encryption/decryption */
     res = data_process(&opts, aes_key_sched);
     if(res != 0) {
         ERR("Failed to process data");
-        return 1;
+        res = 1;
+        goto exit;
     }
 
-    return 0;
+    res = 0;
+exit:
+    free(sha256_msg);
+    return res;
 }
 
