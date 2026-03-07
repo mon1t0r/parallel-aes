@@ -5,12 +5,34 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#define TASK_CHECK_SYSTEM 1
+
+#if TASK_CHECK_SYSTEM
+/* Compiling for task check system */
+
+int g_err_printed = 0;
+
+#define ERR(str)               \
+    do {                       \
+        if(!g_err_printed) {   \
+            printf("chyba");   \
+            g_err_printed = 1; \
+        }                      \
+    } while(0)
+
+#define ERR_LIB(call_name, str) ERR(str)
+
+#else
+
+/* Normal compilation */
 #define ERR(str) fprintf(stderr, "%s\n", str)
 #define ERR_LIB(call_name, str) \
     do {                        \
         perror(call_name);      \
         ERR(str);               \
     } while(0)
+
+#endif /* TASK_CHECK_SYSTEM */
 
 #define OPT_STR "sdp:i:o:"
 

@@ -1,7 +1,6 @@
 CC:=gcc
 CFLAGS:= \
 	-ansi \
-	-pedantic \
 	-Wno-long-long \
 	-Wall \
 	-Wextra \
@@ -9,7 +8,8 @@ CFLAGS:= \
 	-O2
 
 ZIP_AR:=zadanie1.zip
-TARGET:=zadanie1
+# XXX: Needed for task checking system, this is NOT an a PE file
+TARGET:=zadanie1.exe
 SRCS:=zadanie1.c
 
 OBJS:=$(addsuffix .o,$(basename $(SRCS)))
