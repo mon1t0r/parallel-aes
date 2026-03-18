@@ -481,8 +481,16 @@ static word *sha256_alloc_prep_msg(const char *msg, int *msg_sz_blk)
 
     memcpy(msg_pad, msg, msg_len);
 
-    /* Set bit after msg in endian-independent way */
-    msg_pad[msg_len / word_sz] = 0x80 << ((3 - (msg_len % word_sz)) * 8);
+    /* Set bit after msg */
+    msg_pad[msg_len / word_sz] |= 0x80 << ((msg_len % word_sz) * 8);
+
+    /* Convert Little Endian message to SHA-256 Big Endian */
+    for(i = 0; i < msg_pad_sz / word_sz; i++) {
+        msg_pad[i] = (((msg_pad[i] >> 24) & 0xFF) << 0 ) |
+                     (((msg_pad[i] >> 16) & 0xFF) << 8 ) |
+                     (((msg_pad[i] >> 8 ) & 0xFF) << 16) |
+                     (((msg_pad[i] >> 0 ) & 0xFF) << 24);
+    }
 
     msg_pad[msg_pad_sz / word_sz - 1] = msg_len_bits;
 
