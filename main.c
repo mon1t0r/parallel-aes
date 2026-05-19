@@ -272,6 +272,9 @@ int main(int argc, const char *const *argv)
     /* Compute SHA-256 hash from SHA-256 message */
     sha256_compute(sha256_msg, sha256_msg_sz_blk, sha256_key_hash);
 
+    /* Free SHA-256 message */
+    free(sha256_msg);
+
     /* Compute AES key schedule from SHA-256 hash */
     aes_key_expansion((aes_byte *) sha256_key_hash, aes_key_sched);
 
@@ -279,13 +282,9 @@ int main(int argc, const char *const *argv)
     res = data_process(&opts, aes_key_sched);
     if(res != 0) {
         ERR("Failed to process data");
-        res = 1;
-        goto exit;
+        return 1;
     }
 
-    res = 0;
-exit:
-    free(sha256_msg);
-    return res;
+    return 0;
 }
 
