@@ -1,6 +1,10 @@
 #ifndef PARALLEL_AES_SHA256_H
 #define PARALLEL_AES_SHA256_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Word - size 4 bytes */
 typedef unsigned int sha256_word;
 
@@ -26,6 +30,10 @@ sha256_word *sha256_alloc_prep_msg(const char *msg, int *msg_sz_blk);
 
 /* Compute SHA-256 hash from preprocessed message (Sec. 6.2.2) */
 void sha256_compute(const sha256_word *msg, int msg_sz_blk, sha256_word *hash);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 

@@ -1,6 +1,10 @@
 #ifndef PARALLEL_AES_AES_H
 #define PARALLEL_AES_AES_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Byte - size 1 byte */
 typedef unsigned char aes_byte;
 
@@ -41,6 +45,10 @@ void aes_cipher(aes_byte *block, const aes_word *key_sched);
 
 /* AES InvCipher implementation (Sec. 5.3) */
 void aes_inv_cipher(aes_byte *block, const aes_word *key_sched);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 
