@@ -15,8 +15,8 @@
 #define OPT_STR "edp:i:o:"
 
 enum {
-    thread_cnt    = 5,
-    thread_buf_sz = aes_block_sz * 10,
+    thread_cnt    = 8,
+    thread_buf_sz = aes_block_sz * 1024 * 1024 * 1, /* 16 MiB */
     buf_sz        = thread_buf_sz * thread_cnt
 };
 
@@ -67,20 +67,22 @@ static void *thread_main(void *data)
 {
     struct thread_ctx *ctx = static_cast<struct thread_ctx*>(data);
 
-    // Wait for main thread to allow start processing
-    sem_wait(&ctx->start_sem);
+    for(;;) {
+        // Wait for main thread to allow start processing
+        sem_wait(&ctx->start_sem);
 
-    for(int i = 0; i < ctx->block_cnt; i++) {
-        aes_byte *block = ctx->buf + i * aes_block_sz;
-        if(ctx->enc) {
-            aes_cipher(block, ctx->aes_key_sched);
-        } else {
-            aes_inv_cipher(block, ctx->aes_key_sched);
+        for(int i = 0; i < ctx->block_cnt; i++) {
+            aes_byte *block = ctx->buf + i * aes_block_sz;
+            if(ctx->enc) {
+                aes_cipher(block, ctx->aes_key_sched);
+            } else {
+                aes_inv_cipher(block, ctx->aes_key_sched);
+            }
         }
-    }
 
-    // Notify main thread that processing finished
-    sem_post(&ctx->end_sem);
+        // Notify main thread that processing finished
+        sem_post(&ctx->end_sem);
+    }
 
     return 0;
 }
@@ -240,6 +242,8 @@ int main(int argc, const char *const *argv)
     do {
         int read_sz = 0;
 
+        printf("Reading...\n");
+
         // Read buffer size or until no more data to read
         while(read_sz < buf_sz) {
             int sz = read(fd_in, buf + read_sz, buf_sz - read_sz);
@@ -256,6 +260,8 @@ int main(int argc, const char *const *argv)
 
             read_sz += sz;
         }
+
+        printf("Processing...\n");
 
         if(opts.enc) {
             // Set last iteration flag
@@ -315,6 +321,8 @@ int main(int argc, const char *const *argv)
                 to_write_sz = read_sz;
             }
         }
+
+        printf("Writing...\n");
 
         // Write buffer
         int write_sz = 0;

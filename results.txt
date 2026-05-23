@@ -1,0 +1,57 @@
+### Test 1
+
+dd if=/dev/zero of=enc_in.bin bs=4M count=64
+
+enum {
+    thread_cnt    = 1,
+    thread_buf_sz = aes_block_sz * 1024 * 1024 * 1, /* 16 MiB */
+    buf_sz        = thread_buf_sz * thread_cnt
+};
+
+real    0m47.768s
+user    0m44.756s
+sys     0m0.157s
+
+
+### Test 2
+
+dd if=/dev/zero of=enc_in.bin bs=4M count=64
+
+enum {
+    thread_cnt    = 5,
+    thread_buf_sz = aes_block_sz * 1024 * 1024 * 1, /* 16 MiB */
+    buf_sz        = thread_buf_sz * thread_cnt
+};
+
+real    0m11.965s
+user    0m47.497s
+sys     0m0.150s
+
+### Test 3
+
+dd if=/dev/zero of=enc_in.bin bs=4M count=64
+
+enum {
+    thread_cnt    = 8
+    thread_buf_sz = aes_block_sz * 1024 * 1024 * 2, /* 32 MiB */
+    buf_sz        = thread_buf_sz * thread_cnt
+};
+
+real    0m8.997s
+user    0m59.974s
+sys     0m0.158s
+
+### Test 3
+
+dd if=/dev/zero of=enc_in.bin bs=4M count=64
+
+enum {
+    thread_cnt    = 8
+    thread_buf_sz = aes_block_sz * 1024 * 1024 * 1, /* 16 MiB */
+    buf_sz        = thread_buf_sz * thread_cnt
+};
+
+real    0m9.073s
+user    1m0.841s
+sys     0m0.165s
+
