@@ -12,12 +12,11 @@
 #include "sha256.h"
 #include "pkcs7.h"
 
-#define OPT_STR "edp:i:o:"
+#define OPT_STR "edp:i:o:t:"
 
 enum {
-    thread_cnt    = 8,
-    thread_buf_sz = aes_block_sz * 1024 * 1024 * 1, /* 16 MiB */
-    buf_sz        = thread_buf_sz * thread_cnt
+    blocks_per_thread_sz = 1024 * 1024, // * aes_block_sz = 16 MiB
+    thread_buf_sz = blocks_per_thread_sz * aes_block_sz
 };
 
 struct opts {
@@ -25,16 +24,16 @@ struct opts {
     const char *pwd;
     const char *file_in;
     const char *file_out;
+    int thread_cnt;
 };
 
 struct thread_ctx {
     aes_byte *buf;
+    int buf_block_cnt;
     const aes_word *aes_key_sched;
     sem_t start_sem;
     sem_t end_sem;
     bool enc;
-
-    int block_cnt;
 };
 
 static int fd_is_eof(int fd)
@@ -63,6 +62,32 @@ static int fd_is_eof(int fd)
     return !res;
 }
 
+static long long fd_get_sz(int fd)
+{
+    // Backup stream position
+    long long pos = lseek(fd, 0, SEEK_CUR);
+    if(pos == -1) {
+        ERR_LIB("lseek()", "Failed to obtain current stream position");
+        return -1;
+    }
+
+    // Record end position
+    long long res = lseek(fd, 0, SEEK_END);
+    if(pos == -1) {
+        ERR_LIB("lseek()", "Failed to set stream position");
+        return -1;
+    }
+
+    // Return stream position
+    pos = lseek(fd, pos, SEEK_SET);
+    if(pos == -1) {
+        ERR_LIB("lseek()", "Failed to set stream position");
+        return -1;
+    }
+
+    return res;
+}
+
 static void *thread_main(void *data)
 {
     struct thread_ctx *ctx = static_cast<struct thread_ctx*>(data);
@@ -71,7 +96,7 @@ static void *thread_main(void *data)
         // Wait for main thread to allow start processing
         sem_wait(&ctx->start_sem);
 
-        for(int i = 0; i < ctx->block_cnt; i++) {
+        for(int i = 0; i < ctx->buf_block_cnt; i++) {
             aes_byte *block = ctx->buf + i * aes_block_sz;
             if(ctx->enc) {
                 aes_cipher(block, ctx->aes_key_sched);
@@ -98,6 +123,7 @@ static int opts_parse(struct opts *opts, int argc, const char *const *argv)
 
     memset(opts, 0, sizeof(*opts));
     opts->enc = -1;
+    opts->thread_cnt = 1;
 
     int c;
     do {
@@ -120,6 +146,9 @@ static int opts_parse(struct opts *opts, int argc, const char *const *argv)
                 break;
             case 'o':
                 opts->file_out = optarg;
+                break;
+            case 't':
+                opts->thread_cnt = atoi(optarg);
                 break;
             case ':':
                 ERR("Missing argument");
@@ -155,6 +184,11 @@ static int opts_parse(struct opts *opts, int argc, const char *const *argv)
 
     if(!opts->file_out) {
         ERR("-o option must be specified");
+        return 1;
+    }
+
+    if(opts->thread_cnt <= 0) {
+        ERR("-t option invalid thread count");
         return 1;
     }
 
@@ -200,27 +234,9 @@ int main(int argc, const char *const *argv)
     aes_key_expansion((aes_byte *) sha256_key_hash, aes_key_sched);
 
 
-    // Allocate one buffer for all threads
-    aes_byte *buf = new aes_byte[buf_sz];
-
-    // Allocate thread contexts
-    struct thread_ctx *ctxs = new struct thread_ctx[thread_cnt];
-
-    // Allocate contexts and start threads
-    for(int i = 0; i < thread_cnt; i++) {
-        // Fill in thread context
-        ctxs[i].buf = buf + i * thread_buf_sz;
-        ctxs[i].aes_key_sched = aes_key_sched;
-        sem_init(&ctxs[i].start_sem, 0, 0);
-        sem_init(&ctxs[i].end_sem, 0, 0);
-        ctxs[i].enc = opts.enc;
-        ctxs[i].block_cnt = 0;
-
-        // Start the thread
-        pthread_t thread;
-        pthread_create(&thread, NULL, &thread_main, &ctxs[i]);
-    }
-
+    aes_byte *buf = 0;
+    struct thread_ctx *ctxs = 0;
+    long long file_in_sz;
 
     // Open input/output files
     int fd_in = 0, fd_out = 0;
@@ -237,6 +253,52 @@ int main(int argc, const char *const *argv)
         res = 1;
         goto exit;
     }
+
+    // Get input file size
+    file_in_sz = fd_get_sz(fd_in);
+    if(file_in_sz < 0) {
+        ERR("Failed to get input file size");
+        res = 1;
+        goto exit;
+    }
+
+    // Determine common buffer size
+    int buf_sz;
+    if(file_in_sz > thread_buf_sz * opts.thread_cnt) {
+        buf_sz = thread_buf_sz * opts.thread_cnt;
+    } else {
+        buf_sz = (file_in_sz / thread_buf_sz) * thread_buf_sz +
+            (file_in_sz % thread_buf_sz ? thread_buf_sz : 0);
+
+        // Lower thread count
+        opts.thread_cnt = buf_sz / thread_buf_sz;
+    }
+
+    printf("Processing %lld byte file with %d thread(s) and %d byte common "
+           "thread buffer (%d byte per thread)\n",
+           file_in_sz, opts.thread_cnt, buf_sz, thread_buf_sz);
+
+    // Allocate one buffer for all threads
+    buf = new aes_byte[buf_sz];
+
+    // Allocate thread contexts
+    ctxs = new struct thread_ctx[opts.thread_cnt];
+
+    // Allocate contexts and start threads
+    for(int i = 0; i < opts.thread_cnt; i++) {
+        // Fill in thread context
+        ctxs[i].buf = buf + i * thread_buf_sz;
+        ctxs[i].buf_block_cnt = 0;
+        ctxs[i].aes_key_sched = aes_key_sched;
+        sem_init(&ctxs[i].start_sem, 0, 0);
+        sem_init(&ctxs[i].end_sem, 0, 0);
+        ctxs[i].enc = opts.enc;
+
+        // Start the thread
+        pthread_t thread;
+        pthread_create(&thread, 0, &thread_main, &ctxs[i]);
+    }
+
 
     int is_eof;
     do {
@@ -268,7 +330,7 @@ int main(int argc, const char *const *argv)
             is_eof = read_sz < buf_sz;
 
             if(is_eof) {
-                int last_block_off = (read_sz / aes_block_sz) * aes_block_sz;
+                int last_block_off = ROUND_DOWN_AES_BLOCK_SZ(read_sz);
 
                 // Pad the rest of the space of the last block
                 pkcs7_pad(buf + last_block_off, read_sz - last_block_off,
@@ -299,9 +361,11 @@ int main(int argc, const char *const *argv)
         for(int i = 0; i < used_thread_cnt; i++) {
             int left_sz = read_sz - i * thread_buf_sz;
             int handle_sz = left_sz >= thread_buf_sz ? thread_buf_sz : left_sz;
-            ctxs[i].block_cnt = handle_sz / aes_block_sz;
+            ctxs[i].buf_block_cnt = handle_sz / aes_block_sz;
             sem_post(&ctxs[i].start_sem);
         }
+
+        printf("Waiting for %d thread(s)...\n", used_thread_cnt);
 
         // Wait for every used thread to finish
         for(int i = 0; i < used_thread_cnt; i++) {
@@ -336,6 +400,8 @@ int main(int argc, const char *const *argv)
 
             write_sz += sz;
         }
+
+        printf("\n");
     } while(!is_eof);
 
 
@@ -361,8 +427,12 @@ exit:
 
     delete[] sha256_key_hash;
     delete[] aes_key_sched;
-    delete[] buf;
-    delete[] ctxs;
+    if(buf) {
+        delete[] buf;
+    }
+    if(ctxs) {
+        delete[] ctxs;
+    }
     return res;
 }
 

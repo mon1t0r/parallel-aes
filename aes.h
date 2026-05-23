@@ -46,6 +46,8 @@ void aes_cipher(aes_byte *block, const aes_word *key_sched);
 /* AES InvCipher implementation (Sec. 5.3) */
 void aes_inv_cipher(aes_byte *block, const aes_word *key_sched);
 
+#define ROUND_DOWN_AES_BLOCK_SZ(x) (((x) / aes_block_sz) * aes_block_sz)
+
 #ifdef __cplusplus
 }
 #endif
