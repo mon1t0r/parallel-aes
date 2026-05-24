@@ -109,6 +109,7 @@ static void *thread_main(void *data)
         sem_post(&ctx->end_sem);
     }
 
+    // Never reached
     return 0;
 }
 
@@ -235,6 +236,7 @@ int main(int argc, const char *const *argv)
 
 
     aes_byte *buf = 0;
+    pthread_t *threads = 0;
     struct thread_ctx *ctxs = 0;
     long long file_in_sz;
 
@@ -282,6 +284,7 @@ int main(int argc, const char *const *argv)
     buf = new aes_byte[buf_sz];
 
     // Allocate thread contexts
+    threads = new pthread_t[opts.thread_cnt];
     ctxs = new struct thread_ctx[opts.thread_cnt];
 
     // Allocate contexts and start threads
@@ -295,8 +298,13 @@ int main(int argc, const char *const *argv)
         ctxs[i].enc = opts.enc;
 
         // Start the thread
-        pthread_t thread;
-        pthread_create(&thread, 0, &thread_main, &ctxs[i]);
+        res = pthread_create(&threads[i], 0, &thread_main, &ctxs[i]);
+
+        if(res != 0) {
+            ERR("Failed to create thread");
+            res = 1;
+            goto exit;
+        }
     }
 
 
@@ -404,6 +412,28 @@ int main(int argc, const char *const *argv)
         printf("\n");
     } while(!is_eof);
 
+    // Cancel threads
+    for(int i = 0; i < opts.thread_cnt; i++) {
+        res = pthread_cancel(threads[i]);
+
+        if(res != 0) {
+            ERR("Failed to cancel thread");
+            res = 1;
+            goto exit;
+        }
+    }
+
+    // Join threads
+    for(int i = 0; i < opts.thread_cnt; i++) {
+        res = pthread_join(threads[i], 0);
+
+        if(res != 0) {
+            ERR("Failed to join thread");
+            res = 1;
+            goto exit;
+        }
+    }
+
 
     // Executed successfully
     res = 0;
@@ -430,9 +460,13 @@ exit:
     if(buf) {
         delete[] buf;
     }
+    if(threads) {
+        delete[] threads;
+    }
     if(ctxs) {
         delete[] ctxs;
     }
+
     return res;
 }
 
